@@ -1,3 +1,4 @@
+mod backtest;
 mod config;
 mod db;
 mod execution;
@@ -8,11 +9,41 @@ mod strategy;
 mod websocket;
 
 use anyhow::Result;
+use clap::Parser;
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
+// ═══════════════════════════════════════════════════════════════════
+//  CLI arguments
+// ═══════════════════════════════════════════════════════════════════
+
+/// Binance HFT Bot — Altcoin Breakout Strategy
+#[derive(Parser, Debug)]
+#[command(name = "binance-hft-bot", version, about)]
+struct Cli {
+    /// Run in backtest mode with a CSV file (OHLCV: timestamp,open,high,low,close,volume)
+    #[arg(long, value_name = "FILE")]
+    backtest: Option<String>,
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Entry point
+// ═══════════════════════════════════════════════════════════════════
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // ── Backtest mode: no network, no API keys needed ──
+    if let Some(csv_path) = cli.backtest {
+        return backtest::run_backtest(&csv_path);
+    }
+
+    // ── Live mode: full trading engine ──
+    run_live().await
+}
+
+async fn run_live() -> Result<()> {
     // ── Initialize logging ──
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())

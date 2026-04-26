@@ -24,6 +24,8 @@ chrono = { version = "0.4", features = ["serde"] }
 url = "2"
 anyhow = "1"
 parking_lot = "0.12"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
 
 # ── Release profile: maximum throughput ──────────────────────────
 [profile.release]
