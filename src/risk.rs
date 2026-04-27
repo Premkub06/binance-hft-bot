@@ -56,6 +56,7 @@ pub async fn run_risk_monitor(
                 config.trailing_stop_pct,
                 config.atr_hard_stop_mult,
                 config.atr_trail_mult,
+                config.break_even_target_roe,
             ) {
                 to_close.push((
                     symbol.clone(),

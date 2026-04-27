@@ -142,6 +142,8 @@ pub struct Position {
     /// ATR-14 (price units) captured at the moment of entry.
     /// Used to set a volatility-adjusted trailing stop distance.
     pub atr_at_entry: f64,
+    /// Whether the break-even dynamic hard stop is active.
+    pub break_even_active: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════

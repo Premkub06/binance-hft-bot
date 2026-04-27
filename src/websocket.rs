@@ -320,6 +320,7 @@ async fn execute_signal(
         trailing_active: false,
         order_id: order.order_id,
         atr_at_entry: signal.atr_14,
+        break_even_active: false,
     };
 
     info!(
@@ -424,6 +425,15 @@ async fn connect_mark_price_ws(
                     pos.max_roe = roe;
                 }
 
+                // Activate break-even stop at threshold.
+                if !pos.break_even_active && roe >= config.break_even_trigger_roe {
+                    pos.break_even_active = true;
+                    info!(
+                        "🛡️ Break-even stop ACTIVATED for {} | ROE: {:.2}%",
+                        mp.symbol, roe
+                    );
+                }
+
                 // Activate trailing stop at threshold.
                 if !pos.trailing_active && roe >= config.trailing_activation_roe {
                     pos.trailing_active = true;
@@ -442,6 +452,7 @@ async fn connect_mark_price_ws(
                     config.trailing_stop_pct,
                     config.atr_hard_stop_mult,
                     config.atr_trail_mult,
+                    config.break_even_target_roe,
                 );
 
                 if let Some(reason) = close_reason {

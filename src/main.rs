@@ -250,6 +250,7 @@ async fn recover_positions(
                     trailing_active: false,
                     order_id: 0, // Unknown from recovery.
                     atr_at_entry: 0.0, // ATR unknown at recovery; falls back to ROE hard stop.
+                    break_even_active: false,
                 };
 
                 info!(

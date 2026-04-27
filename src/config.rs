@@ -28,6 +28,14 @@ pub struct Config {
     /// Trailing stop triggers when price pulls back > (atr_trail_mult × ATR) from peak.
     pub atr_trail_mult: f64,
 
+    // ── Break-even / risk-free mechanism ──
+    /// ROE (%) at which the hard stop is raised to break-even.
+    /// Default 15.0 → when ROE crosses +15%, the stop moves up.
+    pub break_even_trigger_roe: f64,
+    /// ROE (%) the hard stop is raised TO once triggered.
+    /// Default 1.0 → guarantees a small profit even if stopped out.
+    pub break_even_target_roe: f64,
+
     // ── Database ──
     pub db_path: String,
 }
@@ -59,6 +67,14 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(2.0),
+            break_even_trigger_roe: env::var("BREAK_EVEN_TRIGGER_ROE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(15.0),
+            break_even_target_roe: env::var("BREAK_EVEN_TARGET_ROE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1.0),
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "hft_bot.db".into()),
         }
     }

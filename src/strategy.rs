@@ -82,8 +82,19 @@ pub fn evaluate_risk(
     _trailing_stop_pct: f64, // kept for signature compatibility
     atr_hard_stop_mult: f64,
     atr_trail_mult: f64,
+    break_even_target_roe: f64,
 ) -> Option<String> {
     let roe = calculate_roe(position, current_price);
+
+    // ── Layer 0: Break-Even stop ──────────────────────────────────
+    if position.break_even_active {
+        if roe <= break_even_target_roe {
+            return Some(format!(
+                "BREAK_EVEN_STOP: ROE {:.2}% <= target {:.2}%",
+                roe, break_even_target_roe
+            ));
+        }
+    }
 
     // ── Layer 1: Hard stop ────────────────────────────────────────
     if position.atr_at_entry > 0.0 {
