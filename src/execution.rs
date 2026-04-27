@@ -177,7 +177,7 @@ impl BinanceClient {
 
         let ts = Self::timestamp_ms();
         let query = format!(
-            "symbol={}&side={}&type=MARKET&quantity={}&timestamp={}&recvWindow=5000",
+            "symbol={}&side={}&type=MARKET&quantity={}&newOrderRespType=RESULT&timestamp={}&recvWindow=5000",
             symbol, side, qty_str, ts
         );
         let sig = self.sign(&query);

@@ -268,8 +268,11 @@ async fn execute_signal(
         .market_order(&signal.symbol, "BUY", quantity, meta_map)
         .await?;
 
-    let entry_price: f64 = order.avg_price.parse().unwrap_or(signal.price);
-    let exec_qty: f64 = order.executed_qty.parse().unwrap_or(quantity);
+    let parsed_price: f64 = order.avg_price.parse().unwrap_or(0.0);
+    let entry_price = if parsed_price > 0.0 { parsed_price } else { signal.price };
+
+    let parsed_qty: f64 = order.executed_qty.parse().unwrap_or(0.0);
+    let exec_qty = if parsed_qty > 0.0 { parsed_qty } else { quantity };
 
     // Record position in memory.
     let position = Position {
