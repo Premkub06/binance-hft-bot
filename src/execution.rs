@@ -210,4 +210,42 @@ impl BinanceClient {
         );
         Ok(order)
     }
+
+    // ── Fetch open positions (state recovery) ──────────────────────
+
+    /// Fetch all currently open positions from Binance Futures API.
+    /// Returns only positions with non-zero quantity (actually open).
+    pub async fn fetch_open_positions(&self) -> Result<Vec<crate::models::BinancePositionRisk>> {
+        let ts = Self::timestamp_ms();
+        let query = format!("timestamp={}&recvWindow=5000", ts);
+        let sig = self.sign(&query);
+        let url = format!(
+            "{}/fapi/v2/positionRisk?{}&signature={}",
+            self.config.base_url, query, sig
+        );
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-MBX-APIKEY", &self.config.api_key)
+            .send()
+            .await
+            .context("Failed to fetch position risk")?;
+
+        let body = resp.text().await.unwrap_or_default();
+        let all_positions: Vec<crate::models::BinancePositionRisk> =
+            serde_json::from_str(&body).context("Failed to parse position risk")?;
+
+        // Filter to only positions with non-zero positionAmt.
+        let open: Vec<_> = all_positions
+            .into_iter()
+            .filter(|p| {
+                let amt: f64 = p.position_amt.parse().unwrap_or(0.0);
+                amt.abs() > 0.0
+            })
+            .collect();
+
+        info!("Fetched {} open positions from Binance", open.len());
+        Ok(open)
+    }
 }

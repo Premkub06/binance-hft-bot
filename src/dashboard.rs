@@ -30,6 +30,7 @@ struct Stats {
     closed_trades: i64,
     winning_trades: i64,
     total_pnl: f64,
+    daily_pnl: f64,
     win_rate: f64,
 }
 
@@ -106,6 +107,15 @@ fn load_stats(conn: &Connection) -> Result<Stats> {
         )
         .unwrap_or(0.0);
 
+    let daily_pnl: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM trades
+             WHERE status = 'CLOSED' AND exit_time >= datetime('now', '-24 hours')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0.0);
+
     let win_rate = if closed_trades > 0 {
         (winning_trades as f64 / closed_trades as f64) * 100.0
     } else {
@@ -118,6 +128,7 @@ fn load_stats(conn: &Connection) -> Result<Stats> {
         closed_trades,
         winning_trades,
         total_pnl,
+        daily_pnl,
         win_rate,
     })
 }
@@ -207,6 +218,16 @@ fn render_stats(frame: &mut Frame, area: Rect, stats: &Stats) {
             Span::styled(
                 format!("{}${:.4}", pnl_sign, stats.total_pnl),
                 Style::default().fg(pnl_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("    │    "),
+            Span::styled("Daily PnL: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}${:.4}",
+                    if stats.daily_pnl >= 0.0 { "+" } else { "" },
+                    stats.daily_pnl),
+                Style::default()
+                    .fg(if stats.daily_pnl >= 0.0 { Color::Green } else { Color::Red })
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("    │    "),
             Span::styled("Win Rate: ", Style::default().fg(Color::Gray)),

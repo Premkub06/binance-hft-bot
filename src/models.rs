@@ -107,6 +107,22 @@ pub struct OrderResponse {
     pub side: String,
 }
 
+/// Position risk from GET /fapi/v2/positionRisk (for state recovery).
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct BinancePositionRisk {
+    pub symbol: String,
+    #[serde(rename = "positionAmt")]
+    pub position_amt: String,
+    #[serde(rename = "entryPrice")]
+    pub entry_price: String,
+    #[serde(rename = "unRealizedProfit")]
+    pub unrealized_profit: String,
+    pub leverage: String,
+    #[serde(rename = "markPrice")]
+    pub mark_price: String,
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  Internal position tracking (lives in PositionMap)
 // ═══════════════════════════════════════════════════════════════════
@@ -123,6 +139,9 @@ pub struct Position {
     pub max_roe: f64,
     pub trailing_active: bool,
     pub order_id: i64,
+    /// ATR-14 (price units) captured at the moment of entry.
+    /// Used to set a volatility-adjusted trailing stop distance.
+    pub atr_at_entry: f64,
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -139,8 +158,12 @@ pub struct SymbolState {
     pub current_price: f64,
     pub current_15m_volume: f64,
     pub avg_volume_7d_15m: f64,
+    /// Rolling 14-period ATR computed from 15m candles (price units).
+    pub atr_14: f64,
     /// Ring buffer of closed 15-min candle volumes for rolling average.
     pub volume_history: VecDeque<f64>,
+    /// Ring buffer of last 15 true ranges for ATR calculation.
+    pub tr_history: VecDeque<f64>,
 }
 
 impl SymbolState {
@@ -151,7 +174,9 @@ impl SymbolState {
             current_price: 0.0,
             current_15m_volume: 0.0,
             avg_volume_7d_15m: 0.0,
+            atr_14: 0.0,
             volume_history: VecDeque::with_capacity(CANDLES_15M_7_DAYS + 16),
+            tr_history: VecDeque::with_capacity(16),
         }
     }
 
@@ -164,6 +189,25 @@ impl SymbolState {
         }
         let sum: f64 = self.volume_history.iter().sum();
         self.avg_volume_7d_15m = sum / self.volume_history.len() as f64;
+    }
+
+    /// Push a new closed candle's True Range and recalculate ATR-14.
+    /// TR = max(high-low, |high-prev_close|, |low-prev_close|)
+    #[inline]
+    pub fn push_true_range(&mut self, high: f64, low: f64, prev_close: f64) {
+        let tr = (high - low)
+            .max((high - prev_close).abs())
+            .max((low - prev_close).abs());
+
+        self.tr_history.push_back(tr);
+        if self.tr_history.len() > 14 {
+            self.tr_history.pop_front();
+        }
+
+        if !self.tr_history.is_empty() {
+            let sum: f64 = self.tr_history.iter().sum();
+            self.atr_14 = sum / self.tr_history.len() as f64;
+        }
     }
 }
 
@@ -192,6 +236,17 @@ pub enum DbEvent {
         level: String,
         message: String,
     },
+    /// Periodic flush of live ROE/PnL for OPEN positions.
+    UpdateLiveRoe {
+        symbol: String,
+        pnl_usd: f64,
+        roe_pct: f64,
+    },
+    /// Mark stale OPEN trades as CLOSED (state recovery).
+    ForceClose {
+        symbol: String,
+        exit_reason: String,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -205,4 +260,6 @@ pub struct TradeSignal {
     pub volume_15m: f64,
     pub avg_volume_7d: f64,
     pub previous_day_high: f64,
+    /// ATR-14 at the moment the signal fires (price units).
+    pub atr_14: f64,
 }

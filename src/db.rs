@@ -73,6 +73,10 @@ pub fn background_writer(conn: Connection, rx: Receiver<DbEvent>) {
                         exit_reason = ?4, exit_time = datetime('now'), status = 'CLOSED'
                         WHERE symbol = ?5 AND status = 'OPEN'";
     let insert_log   = "INSERT INTO system_logs (level, message) VALUES (?1, ?2)";
+    let update_roe   = "UPDATE trades SET pnl_usd = ?1, roe_pct = ?2
+                        WHERE symbol = ?3 AND status = 'OPEN'";
+    let force_close  = "UPDATE trades SET exit_reason = ?1, exit_time = datetime('now'),
+                        status = 'CLOSED' WHERE symbol = ?2 AND status = 'OPEN'";
 
     for event in rx.iter() {
         let result = match &event {
@@ -102,6 +106,23 @@ pub fn background_writer(conn: Connection, rx: Receiver<DbEvent>) {
             DbEvent::SystemLog { level, message } => {
                 conn.execute(insert_log, rusqlite::params![level, message])
             }
+
+            DbEvent::UpdateLiveRoe {
+                symbol,
+                pnl_usd,
+                roe_pct,
+            } => conn.execute(
+                update_roe,
+                rusqlite::params![pnl_usd, roe_pct, symbol],
+            ),
+
+            DbEvent::ForceClose {
+                symbol,
+                exit_reason,
+            } => conn.execute(
+                force_close,
+                rusqlite::params![exit_reason, symbol],
+            ),
         };
 
         if let Err(e) = result {
