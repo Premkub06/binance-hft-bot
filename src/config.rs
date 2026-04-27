@@ -16,6 +16,8 @@ pub struct Config {
     pub leverage: u32,
     pub volume_multiplier: f64,
     pub top_n_symbols: usize,
+    /// Maximum number of concurrent open positions allowed.
+    pub max_open_positions: usize,
 
     // ── Risk parameters ──
     pub hard_stop_roe: f64,
@@ -53,6 +55,10 @@ impl Config {
             leverage: 10,
             volume_multiplier: 3.0,
             top_n_symbols: 100,
+            max_open_positions: env::var("MAX_OPEN_POSITIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(5),
             hard_stop_roe: -10.0,
             trailing_activation_roe: 20.0,
             trailing_stop_pct: 5.0,

@@ -221,12 +221,18 @@ async fn connect_kline_ws(
                 // ── STRATEGY EVALUATION (inline, zero extra lookups) ──
                 let has_position = positions.contains_key(symbol)
                     || pending.contains(symbol.as_str());
-                signal = strategy::evaluate_breakout(
-                    symbol,
-                    state,
-                    config.volume_multiplier,
-                    has_position,
-                );
+                
+                if !has_position && positions.len() >= config.max_open_positions {
+                    // Max positions reached, skip new signal evaluation.
+                    signal = None;
+                } else {
+                    signal = strategy::evaluate_breakout(
+                        symbol,
+                        state,
+                        config.volume_multiplier,
+                        has_position,
+                    );
+                }
             }
         }
 
