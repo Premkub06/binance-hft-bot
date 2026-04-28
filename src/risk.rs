@@ -33,7 +33,7 @@ pub async fn run_risk_monitor(
         }
 
         // Collect symbols that need closing (avoid holding DashMap ref across await).
-        let mut to_close: Vec<(String, f64, f64, String)> = Vec::new();
+        let mut to_close: Vec<(String, f64, f64, String, String)> = Vec::new();
 
         for entry in positions.iter() {
             let symbol = entry.key();
@@ -62,23 +62,30 @@ pub async fn run_risk_monitor(
                     symbol.clone(),
                     pos.quantity,
                     pos.entry_price,
+                    pos.side.clone(),
                     reason,
                 ));
             }
         }
 
         // Execute closures outside of iteration.
-        for (symbol, quantity, entry_price, reason) in to_close {
-            info!("🛡️ RISK SWEEP closing {}: {}", symbol, reason);
+        for (symbol, quantity, entry_price, open_side, reason) in to_close {
+            let close_side = if open_side == "BUY" { "SELL" } else { "BUY" };
+            info!("🛡️ RISK SWEEP closing {} ({} → {}): {}", symbol, open_side, close_side, reason);
 
             match client
-                .market_order(&symbol, "SELL", quantity, &meta_map)
+                .market_order(&symbol, close_side, quantity, &meta_map)
                 .await
             {
                 Ok(order) => {
                     let exit_price: f64 = order.avg_price.parse().unwrap_or(0.0);
-                    let pnl = (exit_price - entry_price) * quantity;
-                    let roe = ((exit_price - entry_price) / entry_price)
+                    let price_delta = if open_side == "BUY" {
+                        exit_price - entry_price
+                    } else {
+                        entry_price - exit_price
+                    };
+                    let pnl = price_delta * quantity;
+                    let roe = (price_delta / entry_price)
                         * config.leverage as f64
                         * 100.0;
 
@@ -93,8 +100,8 @@ pub async fn run_risk_monitor(
                     });
 
                     info!(
-                        "🛡️ RISK CLOSED {} | PnL: ${:.4} | ROE: {:.2}%",
-                        symbol, pnl, roe
+                        "🛡️ RISK CLOSED {} ({}) | PnL: ${:.4} | ROE: {:.2}%",
+                        symbol, open_side, pnl, roe
                     );
                 }
                 Err(e) => {

@@ -67,8 +67,8 @@ pub fn background_writer(conn: Connection, rx: Receiver<DbEvent>) {
     info!("DB background writer started");
 
     // Pre-prepare statements for speed.
-    let insert_trade = "INSERT INTO trades (symbol, entry_price, quantity, leverage, margin_usd, order_id)
-                        VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+    let insert_trade = "INSERT INTO trades (symbol, side, entry_price, quantity, leverage, margin_usd, order_id)
+                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
     let close_trade  = "UPDATE trades SET exit_price = ?1, pnl_usd = ?2, roe_pct = ?3,
                         exit_reason = ?4, exit_time = datetime('now'), status = 'CLOSED'
                         WHERE symbol = ?5 AND status = 'OPEN'";
@@ -82,6 +82,7 @@ pub fn background_writer(conn: Connection, rx: Receiver<DbEvent>) {
         let result = match &event {
             DbEvent::TradeOpened {
                 symbol,
+                side,
                 entry_price,
                 quantity,
                 leverage,
@@ -89,7 +90,7 @@ pub fn background_writer(conn: Connection, rx: Receiver<DbEvent>) {
                 order_id,
             } => conn.execute(
                 insert_trade,
-                rusqlite::params![symbol, entry_price, quantity, leverage, margin_usd, order_id],
+                rusqlite::params![symbol, side, entry_price, quantity, leverage, margin_usd, order_id],
             ),
 
             DbEvent::TradeClosed {

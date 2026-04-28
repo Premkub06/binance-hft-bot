@@ -20,6 +20,10 @@ pub struct Config {
     pub max_open_positions: usize,
     /// EMA trend filter period (e.g., 50 or 200).
     pub ema_period: usize,
+    /// RSI-14 threshold for oversold (LONG entry). Default 30.0.
+    pub rsi_oversold: f64,
+    /// RSI-14 threshold for overbought (SHORT entry). Default 70.0.
+    pub rsi_overbought: f64,
 
     // ── Risk parameters ──
     pub hard_stop_roe: f64,
@@ -65,6 +69,14 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(50),
+            rsi_oversold: env::var("RSI_OVERSOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30.0),
+            rsi_overbought: env::var("RSI_OVERBOUGHT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(70.0),
             hard_stop_roe: -10.0,
             trailing_activation_roe: 20.0,
             trailing_stop_pct: 5.0,

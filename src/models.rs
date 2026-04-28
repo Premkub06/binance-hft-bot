@@ -131,6 +131,8 @@ pub struct BinancePositionRisk {
 #[allow(dead_code)]
 pub struct Position {
     pub symbol: String,
+    /// "BUY" (long) or "SELL" (short).
+    pub side: String,
     pub entry_price: f64,
     pub quantity: f64,
     pub leverage: u32,
@@ -162,6 +164,8 @@ pub struct SymbolState {
     pub avg_volume_7d_15m: f64,
     /// EMA value (price units). Zero means still in warmup — signals are suppressed.
     pub ema: f64,
+    /// RSI-14 value (0–100). Zero means still in warmup.
+    pub rsi_14: f64,
     /// Rolling 14-period ATR computed from 15m candles (price units).
     pub atr_14: f64,
     /// Ring buffer of closed 15-min candle volumes for rolling average.
@@ -171,6 +175,13 @@ pub struct SymbolState {
     /// Warmup accumulator: holds the first `ema_period` closes for SMA seeding.
     /// Cleared once the EMA is seeded to free memory.
     ema_warmup: Vec<f64>,
+    /// RSI internals: Wilder-smoothed average gain/loss.
+    rsi_avg_gain: f64,
+    rsi_avg_loss: f64,
+    rsi_prev_close: f64,
+    rsi_count: usize,
+    rsi_warmup_gains: Vec<f64>,
+    rsi_warmup_losses: Vec<f64>,
 }
 
 impl SymbolState {
@@ -182,10 +193,17 @@ impl SymbolState {
             current_15m_volume: 0.0,
             avg_volume_7d_15m: 0.0,
             ema: 0.0,
+            rsi_14: 0.0,
             atr_14: 0.0,
             volume_history: VecDeque::with_capacity(CANDLES_15M_7_DAYS + 16),
             tr_history: VecDeque::with_capacity(16),
             ema_warmup: Vec::new(),
+            rsi_avg_gain: 0.0,
+            rsi_avg_loss: 0.0,
+            rsi_prev_close: 0.0,
+            rsi_count: 0,
+            rsi_warmup_gains: Vec::with_capacity(14),
+            rsi_warmup_losses: Vec::with_capacity(14),
         }
     }
 
@@ -255,6 +273,62 @@ impl SymbolState {
             // Phase 1: still accumulating, ema remains 0.0 until seeded.
         }
     }
+
+    /// Feed one closed candle’s close price to update RSI-14 (Wilder smoothing).
+    ///
+    /// Phase 1 (warmup): accumulate the first 14 gain/loss deltas.
+    /// Phase 2 (seed):   SMA of those 14 deltas as initial avg_gain / avg_loss.
+    /// Phase 3 (live):   Wilder formula: `avg = (prev_avg * 13 + current) / 14`.
+    #[inline]
+    pub fn push_close_for_rsi(&mut self, close: f64) {
+        if close <= 0.0 {
+            return;
+        }
+        if self.rsi_prev_close <= 0.0 {
+            // First close — just store it, no delta yet.
+            self.rsi_prev_close = close;
+            return;
+        }
+
+        let delta = close - self.rsi_prev_close;
+        self.rsi_prev_close = close;
+        let gain = if delta > 0.0 { delta } else { 0.0 };
+        let loss = if delta < 0.0 { -delta } else { 0.0 };
+
+        self.rsi_count += 1;
+
+        if self.rsi_14 > 0.0 {
+            // Phase 3: Wilder smoothing.
+            self.rsi_avg_gain = (self.rsi_avg_gain * 13.0 + gain) / 14.0;
+            self.rsi_avg_loss = (self.rsi_avg_loss * 13.0 + loss) / 14.0;
+        } else {
+            // Phase 1 & 2: warmup.
+            self.rsi_warmup_gains.push(gain);
+            self.rsi_warmup_losses.push(loss);
+
+            if self.rsi_warmup_gains.len() >= 14 {
+                let sum_gain: f64 = self.rsi_warmup_gains.iter().sum();
+                let sum_loss: f64 = self.rsi_warmup_losses.iter().sum();
+                self.rsi_avg_gain = sum_gain / 14.0;
+                self.rsi_avg_loss = sum_loss / 14.0;
+
+                self.rsi_warmup_gains.clear();
+                self.rsi_warmup_gains.shrink_to_fit();
+                self.rsi_warmup_losses.clear();
+                self.rsi_warmup_losses.shrink_to_fit();
+            } else {
+                return; // Not enough data yet.
+            }
+        }
+
+        // Compute RSI.
+        if self.rsi_avg_loss == 0.0 {
+            self.rsi_14 = 100.0;
+        } else {
+            let rs = self.rsi_avg_gain / self.rsi_avg_loss;
+            self.rsi_14 = 100.0 - (100.0 / (1.0 + rs));
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -265,6 +339,7 @@ impl SymbolState {
 pub enum DbEvent {
     TradeOpened {
         symbol: String,
+        side: String,
         entry_price: f64,
         quantity: f64,
         leverage: u32,
@@ -302,10 +377,14 @@ pub enum DbEvent {
 #[derive(Debug, Clone)]
 pub struct TradeSignal {
     pub symbol: String,
+    /// "BUY" for long, "SELL" for short.
+    pub side: String,
     pub price: f64,
     pub volume_15m: f64,
     pub avg_volume_7d: f64,
     pub previous_day_high: f64,
     /// ATR-14 at the moment the signal fires (price units).
     pub atr_14: f64,
+    /// RSI-14 at signal time.
+    pub rsi_14: f64,
 }

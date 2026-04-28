@@ -238,9 +238,13 @@ async fn recover_positions(
 
                 live_symbols.insert(bp.symbol.clone());
 
+                // Derive side from position amount sign.
+                let side = if qty > 0.0 { "BUY" } else { "SELL" };
+
                 // Populate in-memory position map.
                 let position = Position {
                     symbol: bp.symbol.clone(),
+                    side: side.to_owned(),
                     entry_price: entry,
                     quantity: qty.abs(),
                     leverage: lev,
@@ -248,14 +252,14 @@ async fn recover_positions(
                     entry_time: chrono::Utc::now(),
                     max_roe: 0.0,
                     trailing_active: false,
-                    order_id: 0, // Unknown from recovery.
-                    atr_at_entry: 0.0, // ATR unknown at recovery; falls back to ROE hard stop.
+                    order_id: 0,
+                    atr_at_entry: 0.0,
                     break_even_active: false,
                 };
 
                 info!(
-                    "  ♻️  Recovered position: {} | qty={:.4} | entry={:.6}",
-                    bp.symbol, qty.abs(), entry
+                    "  ♻️  Recovered position: {} {} | qty={:.4} | entry={:.6}",
+                    side, bp.symbol, qty.abs(), entry
                 );
                 positions.insert(bp.symbol.clone(), position);
             }
@@ -310,10 +314,16 @@ fn flush_live_roe(
             continue;
         }
 
-        let roe = ((current_price - pos.entry_price) / pos.entry_price)
+        // Side-aware ROE/PnL.
+        let price_delta = if pos.side == "BUY" {
+            current_price - pos.entry_price
+        } else {
+            pos.entry_price - current_price
+        };
+        let roe = (price_delta / pos.entry_price)
             * config.leverage as f64
             * 100.0;
-        let pnl = (current_price - pos.entry_price) * pos.quantity;
+        let pnl = price_delta * pos.quantity;
 
         let _ = db_tx.send(DbEvent::UpdateLiveRoe {
             symbol: pos.symbol.clone(),

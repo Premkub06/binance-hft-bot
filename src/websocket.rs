@@ -74,6 +74,9 @@ pub async fn bootstrap_state(
                 // EMA: feed every closed candle's close price.
                 state.push_close_for_ema(close, config.ema_period);
 
+                // RSI-14: feed every closed candle's close price.
+                state.push_close_for_rsi(close);
+
                 prev_close = close;
             }
             state.recalc_avg_volume();
@@ -93,8 +96,8 @@ pub async fn bootstrap_state(
             // ── Verify EMA seeded correctly ──────────────────────────────
             if state.ema > 0.0 {
                 info!(
-                    "  📐 Bootstrap [{}]: EMA-{}={:.6} | ATR-14={:.6} | prev_high={:.6}",
-                    symbol, config.ema_period, state.ema, state.atr_14, state.previous_day_high
+                    "  📐 Bootstrap [{}]: EMA-{}={:.6} | RSI-14={:.2} | ATR-14={:.6} | prev_high={:.6}",
+                    symbol, config.ema_period, state.ema, state.rsi_14, state.atr_14, state.previous_day_high
                 );
             } else {
                 warn!(
@@ -254,21 +257,22 @@ async fn connect_kline_ws(
                     }
                     if state.current_price > 0.0 {
                         state.push_close_for_ema(state.current_price, config.ema_period);
+                        state.push_close_for_rsi(state.current_price);
                     }
                 }
 
-                // ── STRATEGY EVALUATION (inline, zero extra lookups) ──
+                // ── STRATEGY EVALUATION ──
                 let has_position = positions.contains_key(symbol)
                     || pending.contains(symbol.as_str());
                 
                 if !has_position && positions.len() >= config.max_open_positions {
-                    // Max positions reached, skip new signal evaluation.
                     signal = None;
                 } else {
-                    signal = strategy::evaluate_breakout(
+                    signal = strategy::evaluate_signal(
                         symbol,
                         state,
-                        config.volume_multiplier,
+                        config.rsi_oversold,
+                        config.rsi_overbought,
                         has_position,
                     );
                 }
@@ -286,8 +290,10 @@ async fn connect_kline_ws(
             }
 
             info!(
-                "🚀 BREAKOUT SIGNAL: {} | price={:.6} > prev_high={:.6} | vol={:.2} > 3×avg={:.2} | ATR-14={:.6}",
-                sig.symbol, sig.price, sig.previous_day_high, sig.volume_15m, sig.avg_volume_7d, sig.atr_14
+                "🚀 {} SIGNAL: {} | price={:.6} | EMA={:.6} | RSI={:.2} | ATR={:.6}",
+                sig.side, sig.symbol, sig.price,
+                0.0_f64, // EMA already checked inside evaluate_signal
+                sig.rsi_14, sig.atr_14
             );
             let client = client.clone();
             let config = config.clone();
@@ -309,7 +315,7 @@ async fn connect_kline_ws(
     Ok(())
 }
 
-/// Execute a breakout signal: place market long, record position.
+/// Execute a trade signal: place market order in the signal's direction.
 async fn execute_signal(
     client: &BinanceClient,
     config: &Config,
@@ -319,18 +325,14 @@ async fn execute_signal(
     db_tx: &Sender<DbEvent>,
     signal: &TradeSignal,
 ) -> Result<()> {
-    // Secondary guard: if a position was inserted by another path
-    // (e.g. state recovery) between the claim and here, abort cleanly.
     if positions.contains_key(&signal.symbol) {
         pending.remove(&signal.symbol);
         return Ok(());
     }
 
-    // Calculate quantity: notional = margin × leverage.
     let notional = config.margin_usd * config.leverage as f64;
     let raw_qty = notional / signal.price;
 
-    // Round to step size.
     let step = meta_map
         .get(&signal.symbol)
         .map(|m| m.step_size)
@@ -342,9 +344,9 @@ async fn execute_signal(
         return Ok(());
     }
 
-    // Place market BUY.
+    // Place market order in the signal's direction.
     let order = client
-        .market_order(&signal.symbol, "BUY", quantity, meta_map)
+        .market_order(&signal.symbol, &signal.side, quantity, meta_map)
         .await?;
 
     let parsed_price: f64 = order.avg_price.parse().unwrap_or(0.0);
@@ -353,9 +355,9 @@ async fn execute_signal(
     let parsed_qty: f64 = order.executed_qty.parse().unwrap_or(0.0);
     let exec_qty = if parsed_qty > 0.0 { parsed_qty } else { quantity };
 
-    // Record position in memory.
     let position = Position {
         symbol: signal.symbol.clone(),
+        side: signal.side.clone(),
         entry_price,
         quantity: exec_qty,
         leverage: config.leverage,
@@ -368,21 +370,18 @@ async fn execute_signal(
         break_even_active: false,
     };
 
+    let close_side = if signal.side == "BUY" { "SELL" } else { "BUY" };
     info!(
-        "✅ POSITION OPENED: {} | entry={:.6} | qty={:.4} | ATR={:.6} | hard_stop={:.6} | trail_stop_dist={:.6}",
-        signal.symbol, entry_price, exec_qty, signal.atr_14,
-        entry_price - config.atr_hard_stop_mult * signal.atr_14,
-        config.atr_trail_mult * signal.atr_14
+        "✅ {} POSITION OPENED: {} | entry={:.6} | qty={:.4} | ATR={:.6} | RSI={:.2} | close_side={}",
+        signal.side, signal.symbol, entry_price, exec_qty, signal.atr_14, signal.rsi_14, close_side
     );
     positions.insert(signal.symbol.clone(), position);
 
-    // Release the pending claim now that position is in the map.
-    // From this point on, positions.contains_key() will guard correctly.
     pending.remove(&signal.symbol);
 
-    // Fire-and-forget DB write.
     let _ = db_tx.send(DbEvent::TradeOpened {
         symbol: signal.symbol.clone(),
+        side: signal.side.clone(),
         entry_price,
         quantity: exec_qty,
         leverage: config.leverage,
@@ -505,21 +504,29 @@ async fn connect_mark_price_ws(
                     let quantity = pos.quantity;
                     let entry_price = pos.entry_price;
                     let leverage = pos.leverage;
+                    let open_side = pos.side.clone();
                     drop(pos_entry); // Release DashMap lock before async work.
 
-                    info!("🛑 CLOSING {}: {}", symbol, reason);
+                    // Close by placing the OPPOSITE side order.
+                    let close_side = if open_side == "BUY" { "SELL" } else { "BUY" };
+                    info!("🛑 CLOSING {} ({} → {}): {}", symbol, open_side, close_side, reason);
 
-                    // Close position via market SELL.
                     match client
-                        .market_order(&symbol, "SELL", quantity, meta_map)
+                        .market_order(&symbol, close_side, quantity, meta_map)
                         .await
                     {
                         Ok(order) => {
                             let exit_price: f64 =
                                 order.avg_price.parse().unwrap_or(price);
-                            let pnl = (exit_price - entry_price) * quantity;
-                            let roe_final =
-                                ((exit_price - entry_price) / entry_price)
+
+                            // Side-aware PnL.
+                            let price_delta = if open_side == "BUY" {
+                                exit_price - entry_price
+                            } else {
+                                entry_price - exit_price
+                            };
+                            let pnl = price_delta * quantity;
+                            let roe_final = (price_delta / entry_price)
                                     * leverage as f64
                                     * 100.0;
 
@@ -534,8 +541,8 @@ async fn connect_mark_price_ws(
                             });
 
                             info!(
-                                "💰 CLOSED {} | PnL: ${:.4} | ROE: {:.2}%",
-                                symbol, pnl, roe_final
+                                "💰 CLOSED {} ({}) | PnL: ${:.4} | ROE: {:.2}%",
+                                symbol, open_side, pnl, roe_final
                             );
                         }
                         Err(e) => {

@@ -1,78 +1,102 @@
 use crate::models::{Position, SymbolState, TradeSignal};
 
-/// Pure, zero-allocation evaluator for the altcoin breakout strategy.
+// ═══════════════════════════════════════════════════════════════════
+//  Bi-directional Trend-Following Mean Reversion Strategy
+// ═══════════════════════════════════════════════════════════════════
+//
+//  LONG entry:
+//    price > EMA (uptrend) AND RSI < oversold threshold (mean reversion dip)
+//    → The asset is trending up but temporarily oversold → buy the dip.
+//
+//  SHORT entry:
+//    price < EMA (downtrend) AND RSI > overbought threshold (mean reversion pop)
+//    → The asset is trending down but temporarily overbought → sell the pop.
+
+/// Evaluate for a LONG or SHORT mean-reversion signal.
 ///
-/// Trigger conditions (both must be true):
-///   1. `current_price > previous_day_high`
-///   2. `current_15m_volume > volume_multiplier × avg_volume_7d_15m`
-///   3. `current_price > ema` (Trend Filter)
-///
-/// Returns `Some(TradeSignal)` if the trigger fires, `None` otherwise.
+/// Returns `Some(TradeSignal)` with `side = "BUY"` or `"SELL"`,
+/// or `None` if no conditions are met.
 #[inline(always)]
-pub fn evaluate_breakout(
+pub fn evaluate_signal(
     symbol: &str,
     state: &SymbolState,
-    volume_multiplier: f64,
+    rsi_oversold: f64,
+    rsi_overbought: f64,
     has_open_position: bool,
 ) -> Option<TradeSignal> {
-    // Skip if we already have a position on this symbol.
     if has_open_position {
         return None;
     }
 
-    // Guard: need valid historical data to evaluate.
-    if state.previous_day_high <= 0.0 || state.avg_volume_7d_15m <= 0.0 || state.ema <= 0.0 {
+    // Guard: need warmed-up indicators.
+    if state.ema <= 0.0 || state.rsi_14 <= 0.0 {
         return None;
     }
 
-    let price_breakout = state.current_price > state.previous_day_high;
-    let volume_surge = state.current_15m_volume > volume_multiplier * state.avg_volume_7d_15m;
-    let trend_up = state.current_price > state.ema;
+    let price = state.current_price;
+    if price <= 0.0 {
+        return None;
+    }
 
-    if price_breakout && volume_surge && trend_up {
-        Some(TradeSignal {
+    // ── LONG: uptrend + oversold dip ──
+    if price > state.ema && state.rsi_14 < rsi_oversold {
+        return Some(TradeSignal {
             symbol: symbol.to_owned(),
-            price: state.current_price,
+            side: "BUY".to_owned(),
+            price,
             volume_15m: state.current_15m_volume,
             avg_volume_7d: state.avg_volume_7d_15m,
             previous_day_high: state.previous_day_high,
             atr_14: state.atr_14,
-        })
-    } else {
-        None
+            rsi_14: state.rsi_14,
+        });
     }
-}
 
-/// Calculate ROE (Return on Equity) percentage for a LONG position.
-#[inline(always)]
-pub fn calculate_roe(position: &Position, current_price: f64) -> f64 {
-    ((current_price - position.entry_price) / position.entry_price)
-        * position.leverage as f64
-        * 100.0
+    // ── SHORT: downtrend + overbought pop ──
+    if price < state.ema && state.rsi_14 > rsi_overbought {
+        return Some(TradeSignal {
+            symbol: symbol.to_owned(),
+            side: "SELL".to_owned(),
+            price,
+            volume_15m: state.current_15m_volume,
+            avg_volume_7d: state.avg_volume_7d_15m,
+            previous_day_high: state.previous_day_high,
+            atr_14: state.atr_14,
+            rsi_14: state.rsi_14,
+        });
+    }
+
+    None
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  ATR-based dynamic risk evaluator
+//  Side-aware ROE calculation
+// ═══════════════════════════════════════════════════════════════════
+
+/// Calculate ROE (Return on Equity) percentage, accounting for position side.
+///
+/// LONG:  `((current - entry) / entry) × leverage × 100`
+/// SHORT: `((entry - current) / entry) × leverage × 100`
+#[inline(always)]
+pub fn calculate_roe(position: &Position, current_price: f64) -> f64 {
+    let price_delta = if position.side == "BUY" {
+        current_price - position.entry_price
+    } else {
+        position.entry_price - current_price
+    };
+    (price_delta / position.entry_price) * position.leverage as f64 * 100.0
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  ATR-based dynamic risk evaluator (side-aware)
 // ═══════════════════════════════════════════════════════════════════
 
 /// Determine if a position should be closed based on ATR-adjusted risk rules.
 ///
-/// **Stop logic (dual-layer):**
-///
-/// Layer 1 — ATR Hard Stop (primary):
-///   Fires if `current_price < entry_price - (atr_hard_stop_mult × ATR)`.
-///   In ROE terms, this adapts to each coin's actual volatility.
-///   Example: entry=$1.00, ATR=$0.03, mult=2.5 → stop at $0.925 → ROE = -7.5% × 10x = -75%
-///   For a quieter coin: ATR=$0.01 → stop at $0.975 → tighter, less capital risk.
-///
-/// Layer 2 — ATR Trailing Stop (after activation ROE threshold):
-///   Fires if `price < peak_price - (atr_trail_mult × ATR)`.
-///   This gives the trade a fixed PRICE buffer (not % buffer) to breathe through
-///   normal volatility, while still locking in gains after the move.
-///
-/// ROE-based hard stop (fallback):
-///   Used when ATR is unavailable (atr_at_entry = 0) — falls back to the
-///   static `hard_stop_roe` from config, ensuring the bot always has a stop.
+/// All stop logic is side-aware:
+///   - LONG hard stop: price drops below entry - N×ATR
+///   - SHORT hard stop: price rises above entry + N×ATR
+///   - Trailing stop: price reverses N×ATR from peak ROE price
 ///
 /// Returns `Some(reason)` if the position should be closed.
 #[inline]
@@ -81,12 +105,13 @@ pub fn evaluate_risk(
     current_price: f64,
     hard_stop_roe: f64,
     trailing_activation_roe: f64,
-    _trailing_stop_pct: f64, // kept for signature compatibility
+    _trailing_stop_pct: f64,
     atr_hard_stop_mult: f64,
     atr_trail_mult: f64,
     break_even_target_roe: f64,
 ) -> Option<String> {
     let roe = calculate_roe(position, current_price);
+    let is_long = position.side == "BUY";
 
     // ── Layer 0: Break-Even stop ──────────────────────────────────
     if position.break_even_active {
@@ -100,44 +125,50 @@ pub fn evaluate_risk(
 
     // ── Layer 1: Hard stop ────────────────────────────────────────
     if position.atr_at_entry > 0.0 {
-        // ATR-dynamic hard stop (price-based).
-        let stop_price = position.entry_price - atr_hard_stop_mult * position.atr_at_entry;
-        if current_price <= stop_price {
+        let atr_distance = atr_hard_stop_mult * position.atr_at_entry;
+        let stop_hit = if is_long {
+            current_price <= position.entry_price - atr_distance
+        } else {
+            current_price >= position.entry_price + atr_distance
+        };
+        if stop_hit {
             return Some(format!(
-                "HARD_STOP(ATR): price {:.6} <= stop {:.6} (entry={:.6} - {:.1}×ATR={:.6}) ROE={:.2}%",
-                current_price, stop_price,
-                position.entry_price, atr_hard_stop_mult, position.atr_at_entry,
+                "HARD_STOP(ATR): {} price {:.6} | stop dist {:.1}×ATR={:.6} | ROE={:.2}%",
+                position.side, current_price,
+                atr_hard_stop_mult, position.atr_at_entry,
                 roe
             ));
         }
     } else {
-        // Fallback to static ROE stop when no ATR data.
         if roe <= hard_stop_roe {
             return Some(format!("HARD_STOP(ROE): {:.2}% <= {:.2}%", roe, hard_stop_roe));
         }
     }
 
-    // ── Layer 2: ATR trailing stop (only after activation) ────────
+    // ── Layer 2: ATR trailing stop ────────────────────────────────
     if position.trailing_active {
         if position.atr_at_entry > 0.0 {
-            // max_roe was set in price units by mark-price stream.
             // Reconstruct the peak price from max_roe.
-            let peak_price = position.entry_price
-                * (1.0 + position.max_roe / (position.leverage as f64 * 100.0));
-            let trail_stop_price = peak_price - atr_trail_mult * position.atr_at_entry;
+            let peak_delta = position.entry_price
+                * position.max_roe / (position.leverage as f64 * 100.0);
+            let trail_distance = atr_trail_mult * position.atr_at_entry;
 
-            if current_price <= trail_stop_price {
+            let trail_hit = if is_long {
+                let peak_price = position.entry_price + peak_delta;
+                current_price <= peak_price - trail_distance
+            } else {
+                let peak_price = position.entry_price - peak_delta;
+                current_price >= peak_price + trail_distance
+            };
+
+            if trail_hit {
                 let drawdown_roe = position.max_roe - roe;
                 return Some(format!(
-                    "TRAILING_STOP(ATR): price {:.6} <= trail {:.6} (peak={:.6} - {:.1}×ATR={:.6}) \
-                     peak_ROE={:.2}% drawdown={:.2}%",
-                    current_price, trail_stop_price, peak_price,
-                    atr_trail_mult, position.atr_at_entry,
-                    position.max_roe, drawdown_roe
+                    "TRAILING_STOP(ATR): {} | ROE={:.2}% | peak_ROE={:.2}% | drawdown={:.2}%",
+                    position.side, roe, position.max_roe, drawdown_roe
                 ));
             }
         } else {
-            // Fallback: static ROE trailing stop.
             let drawdown = position.max_roe - roe;
             if drawdown >= _trailing_stop_pct {
                 return Some(format!(
@@ -148,9 +179,6 @@ pub fn evaluate_risk(
         }
     }
 
-    // ── Check trailing stop activation ────────────────────────────
-    // (Returned as None — activation state is updated by the caller)
-    let _ = trailing_activation_roe; // used by caller
-
+    let _ = trailing_activation_roe;
     None
 }
