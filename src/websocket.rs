@@ -16,6 +16,7 @@ use crate::strategy;
 
 pub async fn bootstrap_state(
     client: &BinanceClient,
+    config: &Config,
     symbols: &[String],
     market_state: &MarketState,
 ) -> Result<()> {
@@ -40,35 +41,70 @@ pub async fn bootstrap_state(
             }
         }
 
-        // Fetch 7 days of 15m candles (max 1500 per request, need 672).
-        if let Ok(klines) = client.fetch_klines(symbol, "15m", 672).await {
+        // Fetch historical 15m candles.
+        // Need max(672, ema_period × 3) candles so the warmup buffer fully seeds.
+        // The LAST element from Binance is the CURRENT OPEN candle — skip it for
+        // indicator calculations since its OHLCV data is still being written.
+        let candle_limit = (672_usize).max(config.ema_period * 3).min(1500);
+        if let Ok(klines) = client.fetch_klines(symbol, "15m", candle_limit as u16).await {
+            let closed_count = klines.len().saturating_sub(1); // exclude the open candle
             let mut prev_close = 0.0_f64;
-            for k in &klines {
-                let high: f64 = k.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let low:  f64 = k.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let close: f64 = k.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                let vol:  f64 = k.get(5).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
+            for k in klines.iter().take(closed_count) {
+                let high:  f64 = k.get(2).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let low:   f64 = k.get(3).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let close: f64 = k.get(4).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                let vol:   f64 = k.get(5).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+
+                if close <= 0.0 {
+                    continue; // malformed candle — skip entirely
+                }
+
+                // Volume history for rolling 7d average.
                 state.volume_history.push_back(vol);
                 if state.volume_history.len() > CANDLES_15M_7_DAYS {
                     state.volume_history.pop_front();
                 }
 
-                // Seed ATR-14 from historical candles.
+                // ATR-14: requires a previous close.
                 if prev_close > 0.0 && high > 0.0 {
                     state.push_true_range(high, low, prev_close);
                 }
-                if close > 0.0 { prev_close = close; }
+
+                // EMA: feed every closed candle's close price.
+                state.push_close_for_ema(close, config.ema_period);
+
+                prev_close = close;
             }
             state.recalc_avg_volume();
 
-            // Current 15m candle volume (last element is still open).
+            // Use the last closed candle's close as the current price baseline.
+            if prev_close > 0.0 {
+                state.current_price = prev_close;
+            }
+
+            // Current 15m volume comes from the open (last) candle only.
             if let Some(last) = klines.last() {
                 if let Some(vol_str) = last.get(5).and_then(|v| v.as_str()) {
                     state.current_15m_volume = vol_str.parse().unwrap_or(0.0);
                 }
             }
+
+            // ── Verify EMA seeded correctly ──────────────────────────────
+            if state.ema > 0.0 {
+                info!(
+                    "  📐 Bootstrap [{}]: EMA-{}={:.6} | ATR-14={:.6} | prev_high={:.6}",
+                    symbol, config.ema_period, state.ema, state.atr_14, state.previous_day_high
+                );
+            } else {
+                warn!(
+                    "  ⚠️  Bootstrap [{}]: EMA not seeded (only {} closed candles, need {}) \
+                     — signals suppressed until warmed up",
+                    symbol, closed_count, config.ema_period
+                );
+            }
         }
+
 
         market_state.insert(symbol.clone(), state);
 
@@ -215,6 +251,9 @@ async fn connect_kline_ws(
                     // prev_close ≈ current price before this candle closed.
                     if high > 0.0 && state.current_price > 0.0 {
                         state.push_true_range(high, low, state.current_price);
+                    }
+                    if state.current_price > 0.0 {
+                        state.push_close_for_ema(state.current_price, config.ema_period);
                     }
                 }
 

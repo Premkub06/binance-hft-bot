@@ -18,6 +18,8 @@ pub struct Config {
     pub top_n_symbols: usize,
     /// Maximum number of concurrent open positions allowed.
     pub max_open_positions: usize,
+    /// EMA trend filter period (e.g., 50 or 200).
+    pub ema_period: usize,
 
     // ── Risk parameters ──
     pub hard_stop_roe: f64,
@@ -59,6 +61,10 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+            ema_period: env::var("EMA_PERIOD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(50),
             hard_stop_roe: -10.0,
             trailing_activation_roe: 20.0,
             trailing_stop_pct: 5.0,

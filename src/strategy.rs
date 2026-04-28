@@ -5,6 +5,7 @@ use crate::models::{Position, SymbolState, TradeSignal};
 /// Trigger conditions (both must be true):
 ///   1. `current_price > previous_day_high`
 ///   2. `current_15m_volume > volume_multiplier × avg_volume_7d_15m`
+///   3. `current_price > ema` (Trend Filter)
 ///
 /// Returns `Some(TradeSignal)` if the trigger fires, `None` otherwise.
 #[inline(always)]
@@ -20,14 +21,15 @@ pub fn evaluate_breakout(
     }
 
     // Guard: need valid historical data to evaluate.
-    if state.previous_day_high <= 0.0 || state.avg_volume_7d_15m <= 0.0 {
+    if state.previous_day_high <= 0.0 || state.avg_volume_7d_15m <= 0.0 || state.ema <= 0.0 {
         return None;
     }
 
     let price_breakout = state.current_price > state.previous_day_high;
     let volume_surge = state.current_15m_volume > volume_multiplier * state.avg_volume_7d_15m;
+    let trend_up = state.current_price > state.ema;
 
-    if price_breakout && volume_surge {
+    if price_breakout && volume_surge && trend_up {
         Some(TradeSignal {
             symbol: symbol.to_owned(),
             price: state.current_price,

@@ -160,12 +160,17 @@ pub struct SymbolState {
     pub current_price: f64,
     pub current_15m_volume: f64,
     pub avg_volume_7d_15m: f64,
+    /// EMA value (price units). Zero means still in warmup — signals are suppressed.
+    pub ema: f64,
     /// Rolling 14-period ATR computed from 15m candles (price units).
     pub atr_14: f64,
     /// Ring buffer of closed 15-min candle volumes for rolling average.
     pub volume_history: VecDeque<f64>,
     /// Ring buffer of last 15 true ranges for ATR calculation.
     pub tr_history: VecDeque<f64>,
+    /// Warmup accumulator: holds the first `ema_period` closes for SMA seeding.
+    /// Cleared once the EMA is seeded to free memory.
+    ema_warmup: Vec<f64>,
 }
 
 impl SymbolState {
@@ -176,9 +181,11 @@ impl SymbolState {
             current_price: 0.0,
             current_15m_volume: 0.0,
             avg_volume_7d_15m: 0.0,
+            ema: 0.0,
             atr_14: 0.0,
             volume_history: VecDeque::with_capacity(CANDLES_15M_7_DAYS + 16),
             tr_history: VecDeque::with_capacity(16),
+            ema_warmup: Vec::new(),
         }
     }
 
@@ -209,6 +216,43 @@ impl SymbolState {
         if !self.tr_history.is_empty() {
             let sum: f64 = self.tr_history.iter().sum();
             self.atr_14 = sum / self.tr_history.len() as f64;
+        }
+    }
+
+    /// Feed one closed candle's close price into the EMA calculation.
+    ///
+    /// **Seeding strategy (industry-standard):**
+    ///   Phase 1 — warmup: accumulate the first `period` closes into `ema_warmup`.
+    ///   Phase 2 — seed:   when `ema_warmup` reaches `period` entries, compute
+    ///                     their SMA and use it as the initial EMA value.
+    ///   Phase 3 — live:   every subsequent close applies the standard EMA formula:
+    ///                     `ema = close × k + prev_ema × (1-k)`  where k = 2/(N+1).
+    ///
+    /// The warmup Vec is cleared after seeding to reclaim memory.
+    #[inline]
+    pub fn push_close_for_ema(&mut self, close: f64, period: usize) {
+        if close <= 0.0 || period == 0 {
+            return;
+        }
+
+        if self.ema > 0.0 {
+            // Phase 3: EMA is seeded — apply standard multiplier.
+            let k = 2.0 / (period as f64 + 1.0);
+            self.ema = close * k + self.ema * (1.0 - k);
+        } else {
+            // Phase 1 & 2: still warming up.
+            self.ema_warmup.push(close);
+
+            if self.ema_warmup.len() >= period {
+                // Phase 2: seed EMA with the SMA of the first `period` closes.
+                let sum: f64 = self.ema_warmup.iter().sum();
+                self.ema = sum / self.ema_warmup.len() as f64;
+
+                // Free the warmup buffer — no longer needed.
+                self.ema_warmup.clear();
+                self.ema_warmup.shrink_to_fit();
+            }
+            // Phase 1: still accumulating, ema remains 0.0 until seeded.
         }
     }
 }

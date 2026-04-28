@@ -109,7 +109,7 @@ async fn run_live() -> Result<()> {
     recover_positions(&client, &config, &positions, &db_tx).await;
 
     // ── Bootstrap historical data ──
-    websocket::bootstrap_state(&client, &symbols, &market_state).await?;
+    websocket::bootstrap_state(&client, &config, &symbols, &market_state).await?;
 
     let _ = db_tx.send(models::DbEvent::SystemLog {
         level: "INFO".into(),
